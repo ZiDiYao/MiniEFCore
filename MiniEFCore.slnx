@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/MiniEFCore.Playground/MiniEFCore.Playground.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/MiniEFCore/MiniEFCore.csproj" />
+  </Folder>
+</Solution>
