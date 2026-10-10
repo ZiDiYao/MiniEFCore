@@ -1,116 +1,116 @@
-# MiniEFCore：从零写一个 ORM 框架
+# MiniEFCore: Build an ORM Framework from Scratch
 
-这个项目用于自己实现一个小型 ORM，学习框架如何认识用户的实体、跟踪对象变化、生成 SQL，以及把查询结果变回对象。项目不引用微软 Entity Framework Core；这里的 `DbContext` 和 `DbSet<T>` 都是我们自己的类型。
+This project is a small ORM built from scratch to explore how a framework discovers application entities, tracks object changes, generates SQL, and turns query results into objects. It does not reference Microsoft Entity Framework Core. The `DbContext` and `DbSet<T>` types here are our own implementations.
 
-本文描述的是本项目的设计路线，不是 EF Core 内部实现的完整复刻。先做一个能解释清楚、能运行的最小版本，再逐步扩展。
+This document describes the design of this project, not an exact reproduction of EF Core internals. Start with a minimal version whose behavior is easy to explain and verify, then expand it gradually.
 
-## 1. ORM 要解决什么问题
+## 1. What an ORM Does
 
-ORM 是 Object-Relational Mapping，对象关系映射。它在 C# 对象和关系型数据库之间建立对应关系：
+ORM stands for Object-Relational Mapping. It connects C# objects to relational database structures:
 
-| C# 世界 | 数据库世界 |
+| C# | Database |
 |---|---|
-| 实体类 `TaskItem` | 表 `TaskItems` |
-| 属性 `Title` | 列 `Title` |
-| 一个 `TaskItem` 对象 | 一行记录 |
-| 主键属性 `Id` | 主键列 `Id` |
+| Entity class `TaskItem` | Table `TaskItems` |
+| Property `Title` | Column `Title` |
+| One `TaskItem` object | One row |
+| Primary key property `Id` | Primary key column `Id` |
 
-框架要完成两个方向的转换：
+The framework handles conversion in both directions:
 
 ```text
-写入：对象及其变化 → 数据库命令和参数 → INSERT / UPDATE / DELETE
-读取：查询条件 → SELECT → 数据行 → C# 对象
+Write: objects and their changes → commands and parameters → INSERT / UPDATE / DELETE
+Read: query conditions → SELECT → data rows → C# objects
 ```
 
-我们自己负责这些转换。数据库驱动负责与数据库通信，数据库引擎负责真正存储数据、执行 SQL 和管理事务。手写 ORM 不要求同时手写数据库驱动和数据库引擎。
+We implement these conversions. A database driver handles communication with the database, while the database engine stores data, executes SQL, and manages transactions. Building an ORM does not require building a database driver or database engine.
 
-## 2. 项目里的两个角色
+## 2. The Two Roles in This Project
 
 ```text
 MiniEFCore/
 ├── MiniEFCore.slnx
 ├── src/
-│   └── MiniEFCore/                 框架：可供不同应用使用
+│   └── MiniEFCore/                 Framework used by different applications
 │       ├── DbContext.cs
 │       └── DbSet.cs
 └── samples/
-    └── MiniEFCore.Playground/      使用者：验证框架行为
+    └── MiniEFCore.Playground/      Consumer that exercises the framework
         ├── AppDbContext.cs
         ├── TaskItem.cs
         └── Program.cs
 ```
 
-框架项目不应该引用 Playground，也不应该把 `TaskItem` 写死在实现里。它应当能处理符合约定的任意实体类型。Playground 引用框架，声明实体，然后调用框架 API。
+The framework project must not reference the Playground or hard-code `TaskItem` into its implementation. It should handle any entity type that meets its supported conventions. The Playground references the framework, declares entities, and calls the framework API.
 
-`AppDbContext` 是应用提供的配置入口；`DbContext` 是我们实现的公共基类。两者通过继承和普通方法调用连接。
+`AppDbContext` is the application's configuration entry point. `DbContext` is the reusable base class we implement. They connect through inheritance and ordinary method calls.
 
-## 3. 大框架：各模块负责什么
+## 3. Overall Architecture
 
 ```mermaid
 flowchart TD
-    App[应用代码 / Playground] --> Context[DbContext：一次工作会话]
-    Context --> Sets[DbSet：实体操作入口]
-    Context --> Model[Model：实体映射元数据]
-    Sets --> Tracker[ChangeTracker：对象与状态]
-    Context --> Save[保存流程]
+    App[Application code / Playground] --> Context[DbContext: unit of work]
+    Context --> Sets[DbSet: entity operations]
+    Context --> Model[Model: mapping metadata]
+    Sets --> Tracker[ChangeTracker: objects and states]
+    Context --> Save[Save pipeline]
     Tracker --> Save
     Model --> Save
-    Sets --> Query[查询流程]
+    Sets --> Query[Query pipeline]
     Model --> Query
-    Save --> SQL[SQL 生成与参数绑定]
+    Save --> SQL[SQL generation and parameter binding]
     Query --> SQL
-    SQL --> Executor[命令执行器 / 数据库驱动]
-    Executor --> DB[(数据库)]
-    Executor --> Materializer[Materializer：数据行转对象]
+    SQL --> Executor[Command executor / database driver]
+    Executor --> DB[(Database)]
+    Executor --> Materializer[Materializer: rows to objects]
     Model --> Materializer
     Materializer --> App
 ```
 
-| 模块 | 核心问题 | 第一版的职责 |
+| Component | Core question | Initial responsibility |
 |---|---|---|
-| `DbContext` | 谁把所有模块组织起来？ | 持有配置、模型、集合缓存和跟踪器，提供 `Set<T>()`、`SaveChanges()` |
-| `DbSet<T>` | 应用如何操作某类实体？ | 提供 `Add`、`Remove`、`Find` 等入口，委托给 Context 的内部服务 |
-| 模型发现与构建 | 框架怎么认识用户定义的类？ | 反射发现实体和属性，应用主键、表名等约定 |
-| 模型元数据 | 发现的信息存在哪里？ | 描述实体类型、表名、列、主键和属性访问方式 |
-| `ChangeTracker` | 哪些对象要插入、修改或删除？ | 记录对象引用、实体状态，后续保存原始值快照 |
-| SQL 生成器 | 如何把操作转换成 SQL？ | 根据映射生成参数化的插入、更新、删除和简单查询命令 |
-| 命令执行器 | 谁负责连接数据库并执行？ | 使用数据库驱动执行命令、管理参数、事务和资源 |
-| `Materializer` | 查询结果怎么变回对象？ | 创建实体，把数据列的值转换并写入属性 |
+| `DbContext` | What coordinates the components? | Own configuration, the model, cached sets, and the tracker; expose `Set<T>()` and `SaveChanges()` |
+| `DbSet<T>` | How does an application operate on one entity type? | Expose operations such as `Add`, `Remove`, and `Find`, delegating to the context's internal services |
+| Model discovery and building | How does the framework understand application classes? | Discover entities and properties through reflection; apply conventions for keys and table names |
+| Model metadata | Where is the discovered structure stored? | Describe entity types, tables, columns, keys, and property access |
+| `ChangeTracker` | Which objects need to be inserted, updated, or deleted? | Store object references and entity states; later capture snapshots of original values |
+| SQL generator | How do operations become SQL? | Use mappings to generate parameterized inserts, updates, deletes, and simple queries |
+| Command executor | What connects to the database and executes commands? | Use a database driver; manage parameters, transactions, and resources |
+| `Materializer` | How do query results become objects? | Create entities, convert column values, and assign properties |
 
-可以先让这些模块很小，不必为每个类都增加接口。等出现第二种实现或测试隔离需求，再提取接口。
+Keep these components small initially. Introduce interfaces when a second implementation or a need to isolate behavior in tests makes them useful, rather than adding an interface for every class immediately.
 
-## 4. 注册、反射、回调和触发分别发生在哪里
+## 4. Registration, Reflection, Callbacks, and Execution
 
-### 4.1 注册是可选的对象组装方式
+### 4.1 Registration Is an Optional Way to Assemble Objects
 
-第一版不需要先实现 `AddDbContext` 或依赖注入容器。直接 `new AppDbContext(...)`，就能验证 ORM 的核心功能。以后接入 DI，只是让容器负责创建和释放 Context。
+The first version does not need `AddDbContext` or a dependency injection container. Creating an instance with `new AppDbContext(...)` is enough to exercise the ORM's core behavior. DI integration can later take responsibility for creating and disposing of contexts.
 
-注册负责保存创建规则；调用 Context 的方法负责执行操作。注册本身不会自动查询数据库。
+Registration stores creation rules. Calling context methods executes operations. Registration alone does not query the database.
 
-### 4.2 反射负责发现类型结构
+### 4.2 Reflection Discovers Type Structure
 
-应用声明：
+The application declares:
 
 ```csharp
 public DbSet<TaskItem> TaskItems => Set<TaskItem>();
 ```
 
-这是后续目标写法，目前骨架尚未实现 `Set<T>()`。
+This is a target API; the current skeleton does not implement `Set<T>()` yet.
 
-模型发现器读取 `AppDbContext` 的属性信息，找到 `DbSet<>` 类型的属性，再提取泛型参数 `TaskItem`。读取属性元数据并不需要执行这个属性的 getter。
+The model discovery component inspects the properties of `AppDbContext`, finds those whose type is `DbSet<>`, and extracts the generic argument `TaskItem`. Reading property metadata does not require executing the property's getter.
 
-之后检查 `TaskItem` 的属性，把支持的属性纳入映射。第一版只支持简单标量属性和单一主键，暂不处理导航属性、继承映射和复合主键。
+It then inspects `TaskItem` and includes supported properties in the mapping. The initial version supports simple scalar properties and a single primary key. Navigation properties, inheritance mapping, and composite keys come later.
 
-### 4.3 约定把类型信息转换成数据库含义
+### 4.3 Conventions Give Type Information Database Meaning
 
-第一版可以自行规定：
+The initial version can define these conventions:
 
-- `DbSet` 属性名作为默认表名，例如 `TaskItems`。
-- 实体属性名作为默认列名，例如 `Title`。
-- 优先使用 `Id` 作为主键，否则尝试 `类型名 + Id`。
-- 没有主键、出现歧义或不支持的映射时，在模型构建阶段报出明确错误。
+- Use the `DbSet` property name as the default table name, such as `TaskItems`.
+- Use each entity property name as the default column name, such as `Title`.
+- Prefer `Id` as the primary key; otherwise try the entity type name followed by `Id`.
+- Report clear errors during model building for missing keys, ambiguous mappings, or unsupported structures.
 
-最终得到一份模型，概念上类似：
+The resulting model conceptually contains:
 
 ```text
 EntityMetadata
@@ -123,66 +123,66 @@ EntityMetadata
     IsCompleted → IsCompleted → bool
 ```
 
-模型描述的是类型结构，不保存某条任务的业务数据。对象实例及其数据属于跟踪器管理的内容。
+The model describes type structure. It does not store the business data for an individual task. Entity instances and their tracked data belong to the change tracker.
 
-### 4.4 回调和虚方法提供扩展点
+### 4.4 Callbacks and Virtual Methods Provide Extension Points
 
-后续可以支持 `options => ...` 这种配置回调：保存一个委托，在准备配置时调用它。也可以提供可重写的 `OnModelCreating`，在模型构建时调用，让使用者覆盖默认映射。
+Later, configuration callbacks such as `options => ...` can be supported by storing a delegate and invoking it when configuration is prepared. An overridable `OnModelCreating` method can also allow applications to customize the model and override conventions.
 
-这些功能都需要我们明确实现调用位置。一个方法不会仅因为名字叫 `OnModelCreating` 就自动执行。
+We must explicitly implement the code that invokes these extension points. A method does not execute automatically just because it is named `OnModelCreating`.
 
-### 4.5 方法调用触发后续工作
+### 4.5 Method Calls Trigger Work
 
 ```text
-读取 context.TaskItems
-    → 执行 getter
-    → 调用我们写的 Set<TaskItem>()
-    → 返回绑定到当前 Context 的 DbSet<TaskItem>
+Read context.TaskItems
+    → execute the getter
+    → call our Set<TaskItem>() implementation
+    → return a DbSet<TaskItem> bound to this context
 
-调用 DbSet.Add(entity)
-    → 调用跟踪器
-    → 记录对象并标记 Added
+Call DbSet.Add(entity)
+    → call the tracker
+    → record the object and mark it Added
 
-调用 context.SaveChanges()
-    → 获取待保存对象
-    → 使用映射生成命令
-    → 执行数据库写入
+Call context.SaveChanges()
+    → collect pending changes
+    → use mappings to generate commands
+    → execute database writes
 ```
 
-反射是读取结构的工具，不是触发操作的监听器。第一版不需要动态代理；直接使用普通方法调用，后续通过原始值快照比较发现属性修改。
+Reflection reads structure; it is not a listener that triggers operations. The first version needs no dynamic proxies. Ordinary method calls drive execution, and snapshots can later be used to detect property changes.
 
-模型可以在首次需要时建立并缓存。第一版先按 Context 实例保存；后续若跨实例缓存，必须明确缓存键和模型配置是否会变化，不能随意复用不同配置下的模型。
+The model can be built and cached when first needed. Start with a model stored per context instance. Before sharing models across instances, define the cache key and account for configuration that might change the model. Models built for different configurations must not be reused indiscriminately.
 
-## 5. 写入流程：Add 到 SaveChanges
+## 5. The Write Pipeline: Add to SaveChanges
 
-下面是目标 API，当前尚未实现：
+The following is a target API, not functionality already implemented:
 
 ```csharp
-var task = new TaskItem { Title = "实现自己的 ORM" };
+var task = new TaskItem { Title = "Build my own ORM" };
 
 context.TaskItems.Add(task);
 context.SaveChanges();
 ```
 
-`Add` 先记录意图，不立即发送 INSERT：
+`Add` records an intention without immediately sending an INSERT:
 
 ```text
 TrackedEntry
-  Entity: task 对象的引用
-  Metadata: TaskItem 的映射
+  Entity: reference to the task object
+  Metadata: mapping for TaskItem
   State: Added
 ```
 
-`SaveChanges` 才执行保存：
+`SaveChanges` performs the actual save:
 
-1. 收集需要保存的实体，后续加入自动检测修改。
-2. 根据实体状态选择 INSERT、UPDATE 或 DELETE。
-3. 根据映射取得表名、列名，并读取对象当前值。
-4. 生成 SQL 和参数，交给执行器。
-5. 一批保存操作放在事务中，全部成功后提交。
-6. 提交成功后更新跟踪状态；失败时回滚并向调用方抛出异常。
+1. Collect entities that need saving; add automatic change detection later.
+2. Choose INSERT, UPDATE, or DELETE according to each entity's state.
+3. Read table and column mappings, then read the object's current values.
+4. Generate SQL and parameters and pass them to the executor.
+5. Execute the batch in a transaction and commit only after every operation succeeds.
+6. Update tracking states after a successful commit; roll back and propagate the exception on failure.
 
-例如，命令内容与值分开：
+For example, keep command text separate from values:
 
 ```sql
 INSERT INTO TaskItems (Id, Title, IsCompleted)
@@ -195,75 +195,75 @@ VALUES (@p0, @p1, @p2);
 @p2 = task.IsCompleted
 ```
 
-实体值必须通过数据库参数传入。表名、列名来自受控映射，并由具体数据库规则进行标识符引用；不能用参数代替表名，也不能直接拼接外部输入。
+Pass entity values through database parameters. Table and column names come from controlled mappings and must be quoted according to the database's identifier rules. Parameters cannot stand in for table names, and external input must not be concatenated directly into SQL.
 
-第一版沿用应用生成的 Guid 主键，先避开数据库生成主键及回填机制。映射知道哪个属性是主键，不代表它自动知道如何生成主键。
+The first version uses application-generated Guid keys, postponing database-generated keys and value propagation. Knowing which property is the primary key does not automatically define how its value is generated.
 
-## 6. 查询流程：数据库行到对象
+## 6. The Query Pipeline: Rows to Objects
 
-先实现简单的 `Find(id)`，不从完整 LINQ 翻译器起步。
+Start with a simple `Find(id)` operation before attempting a complete LINQ translator.
 
 ```text
 context.TaskItems.Find(id)
-    → 读取 TaskItem 的表和主键映射
-    → 生成带主键参数的 SELECT
-    → 执行命令并读取数据行
-    → Materializer 创建 TaskItem
-    → 转换并设置 Id、Title、IsCompleted
-    → 返回对象；没有数据则返回 null
+    → read the table and primary key mapping for TaskItem
+    → generate a SELECT with a primary key parameter
+    → execute the command and read the result row
+    → let the materializer create a TaskItem
+    → convert and assign Id, Title, and IsCompleted
+    → return the object, or null when no row exists
 ```
 
-第一版可以要求实体具有公共无参构造函数、映射属性具有公共 setter。读取时要处理 `DBNull`、可空属性，以及数据库类型与 CLR 类型的转换。
+Initially, entities can be required to have a public parameterless constructor and public setters for mapped properties. Reading values must account for `DBNull`, nullable properties, and conversions between database types and CLR types.
 
-第一版查询可以不跟踪结果；加入“查询后直接修改再保存”时，需要进一步实现：
+Queries can initially return untracked objects. Supporting “query an object, modify it, and save” then requires:
 
-- 查询对象加入跟踪器，并保留原始值快照。
-- 按实体类型和主键维护身份映射，避免同一 Context 中同一行被重复跟踪为不同对象。
-- `SaveChanges` 比较原始值与当前值，找出需要更新的属性。
+- Adding queried objects to the tracker and capturing original value snapshots.
+- Maintaining an identity map by entity type and primary key, so one database row is not tracked as multiple distinct objects within the same context.
+- Comparing original and current values during `SaveChanges` to identify properties that need updating.
 
-## 7. 变更跟踪的最小状态模型
+## 7. A Minimal Change Tracking State Model
 
-| 状态 | 含义 | 保存行为 |
+| State | Meaning | Save behavior |
 |---|---|---|
-| `Detached` | 当前 Context 未跟踪 | 不参与保存 |
-| `Added` | 待插入 | INSERT |
-| `Unchanged` | 已跟踪，当前没有变化 | 不写入 |
-| `Modified` | 已跟踪，数据已修改 | UPDATE |
-| `Deleted` | 待删除 | DELETE |
+| `Detached` | Not tracked by this context | Excluded from saving |
+| `Added` | Pending insertion | INSERT |
+| `Unchanged` | Tracked with no current changes | No write |
+| `Modified` | Tracked data has changed | UPDATE |
+| `Deleted` | Pending deletion | DELETE |
 
-第一步只实现 `Added`，做通插入流程。之后再处理状态转换，例如：新增但尚未保存的对象被删除，应取消插入，而不是向数据库发送 DELETE。
+Implement `Added` first and complete the insertion path. Then handle state transitions. For example, removing a newly added object before it has been saved should cancel its insertion rather than send a DELETE to the database.
 
-不要把 `DbSet<T>` 简单当成一个 `List<T>`。数据库可能包含大量尚未加载的数据；DbSet 是操作入口，跟踪器只管理本次 Context 接触到的部分对象。
+Do not treat `DbSet<T>` as simply a `List<T>`. The database may contain many rows that have never been loaded. A DbSet is an entry point for operations, and the tracker manages only the objects encountered by the current context.
 
-## 8. 实现顺序与完成标准
+## 8. Implementation Order and Completion Criteria
 
-| 阶段 | 实现内容 | 如何判断完成 |
+| Stage | Implementation | Completion criteria |
 |---|---|---|
-| 1. 实体发现 | 扫描 `DbSet<T>`，提取实体属性和主键 | 输出 `TaskItems → TaskItem` 及其属性；缺少主键时明确报错 |
-| 2. 模型与集合 | 定义元数据，实现 `Set<T>()` 和集合缓存 | 同一 Context 多次获取同类集合得到同一实例；不同 Context 不混用集合 |
-| 3. 跟踪新增 | 定义状态和跟踪条目，实现 `Add` | 调用 Add 后能看到 Added 条目，尚未执行 SQL |
-| 4. 插入命令 | 根据模型生成 INSERT 和参数 | 表名、列名和值正确，含引号的文本仍作为参数处理 |
-| 5. 真正持久化 | 接入一个驱动、连接与事务 | 保存后用新 Context 查询或独立 SQL 验证数据确实存在 |
-| 6. 简单查询 | 实现 Find 和数据行到对象的转换 | 能按主键读取；查不到返回 null；属性转换正确 |
-| 7. 修改和删除 | 快照比较、身份映射、UPDATE、DELETE | 查出对象后修改并保存有效；同一行不会重复跟踪 |
-| 8. 可用性 | 异步、取消、配置入口、DI 集成 | 生命周期和失败行为清晰，不泄漏连接等资源 |
-| 9. 查询表达式 | 逐步支持表达式树和有限 LINQ | 明确支持的查询子集，不支持的表达式给出错误 |
+| 1. Entity discovery | Scan `DbSet<T>` properties; discover entity properties and keys | Print `TaskItems → TaskItem` and its properties; report a clear error when a key is missing |
+| 2. Models and sets | Define metadata, implement `Set<T>()`, and cache sets | Repeated access to the same entity set within one context returns the same instance; sets are not shared across contexts |
+| 3. Track additions | Define states and entries; implement `Add` | Calling Add creates an Added entry without executing SQL |
+| 4. Insert commands | Generate INSERT statements and parameters from mappings | Tables, columns, and values are correct; text containing quotes is still passed as a parameter |
+| 5. Persistence | Integrate one driver, connections, and transactions | After saving, verify the data using a new context or an independent SQL query |
+| 6. Simple queries | Implement Find and materialization | Read by primary key, return null when absent, and convert property values correctly |
+| 7. Updates and deletes | Add snapshots, identity mapping, UPDATE, and DELETE | Queried objects can be changed and saved; the same row is not tracked twice |
+| 8. Usability | Add async operations, cancellation, configuration, and DI integration | Lifetimes and failure behavior are clear; connections and other resources are released |
+| 9. Query expressions | Gradually support expression trees and a limited LINQ subset | Supported queries are explicit; unsupported expressions produce clear errors |
 
-第 5 阶段建议用本地 SQLite 文件验证完整流程，只引入 SQLite 数据库驱动，不引入 EF Core。这个选择可以稍后调整；目前尚未添加数据库包。
+For stage 5, a local SQLite file is a practical initial choice. Reference only the SQLite database driver, not EF Core. This choice can be revisited; no database package has been added yet.
 
-早期可以手写建表 SQL。迁移系统、关联加载、动态代理、数据库提供程序抽象和完整 LINQ 支持属于后续扩展，不作为第一个可运行版本的前提。
+Early versions can use handwritten SQL to create tables. Migrations, relationship loading, dynamic proxies, database provider abstractions, and full LINQ support are later extensions, not prerequisites for the first working version.
 
-## 9. 当前已完成与下一步
+## 9. Current Status and Next Step
 
-当前已经有：
+The project currently includes:
 
-- .NET 10 解决方案和框架类库。
-- 自定义的空 `DbContext`、`DbSet<T>` 类型。
-- 引用类库的 Playground、示例 `AppDbContext` 和 `TaskItem`。
+- A .NET 10 solution and framework class library.
+- Empty custom `DbContext` and `DbSet<T>` types.
+- A Playground that references the library, with an example `AppDbContext` and `TaskItem`.
 
-当前还没有实体发现、映射、变更跟踪、数据库连接或增删改查实现。Playground 目前只输出学习提示，不表示 ORM 已经工作。
+Entity discovery, mapping, change tracking, database connections, and CRUD operations are not implemented yet. The Playground currently prints learning prompts; it does not demonstrate a working ORM.
 
-运行骨架：
+Run the skeleton:
 
 ```bash
 cd /Users/zidiyao/Documents/Projects/MiniEFCore
@@ -271,4 +271,4 @@ dotnet build MiniEFCore.slnx
 dotnet run --project samples/MiniEFCore.Playground
 ```
 
-下一步从实体发现开始：先在 Playground 观察反射得到的类型信息，再把通用逻辑提取进框架。完成后新增另一个实体，验证框架能自动发现它，而不必修改针对 `TaskItem` 写死的代码。
+Start with entity discovery: inspect reflected type information in the Playground, then extract the reusable logic into the framework. Add a second entity afterward to verify that the framework discovers it without requiring changes to code hard-coded for `TaskItem`.
